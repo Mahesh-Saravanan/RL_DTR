@@ -19,7 +19,7 @@ import sys
 import csv
 import time
 import random
-from collections import deque, namedtuple
+from collections import deque
 
 import numpy as np
 import torch
@@ -51,33 +51,45 @@ MODEL_DIR       = "models"
 LOG_DIR         = "logs"
 BUFFER_WARMUP   = 5000      # transitions before first gradient step
 
-Transition = namedtuple(
-    "Transition", ("state", "action", "reward", "next_state", "done")
-)
-
-
 # ═══════════════════════════════════════════════════════════════
 #  Replay Buffer
 # ═══════════════════════════════════════════════════════════════
 
 class ReplayBuffer:
-    def __init__(self, capacity):
-        self.buf = deque(maxlen=capacity)
+    def __init__(self, capacity, state_dim=STATE_DIM):
+        self.capacity = capacity
+        self.ptr = 0
+        self.size = 0
+
+        self.states = np.zeros((capacity, state_dim), dtype=np.float32)
+        self.actions = np.zeros((capacity, 1), dtype=np.int64)
+        self.rewards = np.zeros((capacity, 1), dtype=np.float32)
+        self.next_states = np.zeros((capacity, state_dim), dtype=np.float32)
+        self.dones = np.zeros((capacity, 1), dtype=np.float32)
 
     def push(self, state, action, reward, next_state, done):
-        self.buf.append(Transition(state, action, reward, next_state, done))
+        self.states[self.ptr] = state
+        self.actions[self.ptr] = action
+        self.rewards[self.ptr] = reward
+        self.next_states[self.ptr] = next_state
+        self.dones[self.ptr] = done
+
+        self.ptr = (self.ptr + 1) % self.capacity
+        self.size = min(self.size + 1, self.capacity)
 
     def sample(self, n):
-        batch = random.sample(self.buf, n)
-        states      = torch.FloatTensor(np.array([t.state      for t in batch]))
-        actions     = torch.LongTensor( [t.action     for t in batch])
-        rewards     = torch.FloatTensor([t.reward     for t in batch])
-        next_states = torch.FloatTensor(np.array([t.next_state for t in batch]))
-        dones       = torch.FloatTensor([t.done       for t in batch])
+        idx = np.random.randint(0, self.size, size=n)
+
+        states = torch.FloatTensor(self.states[idx])
+        actions = torch.LongTensor(self.actions[idx]).squeeze(1)
+        rewards = torch.FloatTensor(self.rewards[idx]).squeeze(1)
+        next_states = torch.FloatTensor(self.next_states[idx])
+        dones = torch.FloatTensor(self.dones[idx]).squeeze(1)
+
         return states, actions, rewards, next_states, dones
 
     def __len__(self):
-        return len(self.buf)
+        return self.size
 
 
 # ═══════════════════════════════════════════════════════════════

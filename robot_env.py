@@ -374,24 +374,26 @@ class RobotWallEnv(gym.Env):
 
     def _get_observation(self):
         """Build 24-dim observation: 16 pixel offsets + 8 marker areas."""
-        frame, corners, ids = self._render_frame()
-
         marker_centers_px = np.zeros((8, 2), dtype=np.float32)
         marker_areas_px   = np.zeros(8, dtype=np.float32)
         marker_visible    = np.zeros(8, dtype=np.int8)
 
-        if corners is not None and ids is not None:
-            for i, c in enumerate(corners):
-                idx = int(ids[i][0])
-                if 0 <= idx < 8:
-                    pts = c[0]
-                    marker_centers_px[idx] = [
-                        pts[:, 0].mean(), pts[:, 1].mean()
-                    ]
-                    x1, y1 = pts[:, 0].min(), pts[:, 1].min()
-                    x2, y2 = pts[:, 0].max(), pts[:, 1].max()
-                    marker_areas_px[idx] = (x2 - x1) * (y2 - y1)
-                    marker_visible[idx] = 1
+        markers = self._marker_3d_centres_and_boxes()
+        for i, (ctr3, cor3) in enumerate(markers):
+            c2, cvalid = self._project_points(ctr3)
+            b2, bvalid = self._project_points(cor3)
+
+            # Consider marker visible if its center is in front of the camera (z > 0.01)
+            # and within image bounds (for realistic simulation of ArUco)
+            if cvalid[0] and np.all(bvalid):
+                cx, cy = c2[0]
+                # Check if center is roughly within the camera view
+                if 0 <= cx <= self.W and 0 <= cy <= self.H:
+                    marker_centers_px[i] = [cx, cy]
+                    x1, y1 = b2[:, 0].min(), b2[:, 1].min()
+                    x2, y2 = b2[:, 0].max(), b2[:, 1].max()
+                    marker_areas_px[i] = (x2 - x1) * (y2 - y1)
+                    marker_visible[i] = 1
 
         # ── pixel offsets (normalised) ───────────────────────
         # offset = (marker_center - ref_center) / image_dim
@@ -485,7 +487,7 @@ class RobotWallEnv(gym.Env):
 
         # ── safety / visibility penalty ──────────────────────
         if num_visible < 8 or self._out_of_bounds():
-            reward -= 100.0
+            reward -= 1000.0
 
         # ── anti-jiggle penalty ──────────────────────────────
         # Penalise immediately reversing the previous action
@@ -495,7 +497,7 @@ class RobotWallEnv(gym.Env):
                 reward -= 5.0
 
         # ── step cost ────────────────────────────────────────
-        reward -= 0.5
+        reward -= 0.05
 
         return reward
 
