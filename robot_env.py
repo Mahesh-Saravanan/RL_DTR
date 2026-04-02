@@ -34,10 +34,11 @@ class RobotWallEnv(gym.Env):
         7: Rotate CCW (Yaw around Z)
 
     Reward Function:
-        Potential-Based: 10.0 × (E_{t-1} - E_t)
-        Terminal Success: +500 if E < threshold (all markers within 3px)
-        Safety Penalty:  -100 if any marker lost or robot out of XY bounds
-        Step Cost:       -0.5 per action
+        Potential-Based: 0.1 × (E_{t-1} - E_t)
+        Terminal Success: +10.0 if E < threshold AND yaw <= 0.4°
+        Safety Penalty:  -10.0 if any marker lost or robot out of XY bounds (collision)
+        Yaw Potential:   5.0 × (|yaw_{t-1}| - |yaw_t|)
+        Step Cost:       -0.05 per action
     """
 
     def __init__(self):
@@ -101,6 +102,12 @@ class RobotWallEnv(gym.Env):
         # ── XY boundary limits (spec X, spec Y) ─────────────
         self.x_bound = (-1.0, 1.0)        # lateral bounds (metres)
         self.y_bound = (0.5, 3.5)          # depth bounds (distance from wall)
+        
+        # ── reset ranges (for curriculum) ──────────────────
+        self.reset_x_range   = 0.5        # +/- metres
+        self.reset_z_range   = 0.3        # +/- metres (vertical)
+        self.reset_y_range   = 0.5        # +/- depth deviation from start_distance
+        self.reset_yaw_range = 40.0       # +/- degrees
 
         # ── area normalisation ───────────────────────────────
         self.max_marker_area = float(self.W * self.H)  # theoretical max
@@ -291,11 +298,11 @@ class RobotWallEnv(gym.Env):
         self._prev_action = -1
 
         if self.random_reset:
-            self.rx  = self.np_random.uniform(-0.5, 0.5)       # spec X
-            self.ry  = self.np_random.uniform(-0.3, 0.3)       # spec Z (vertical)
-            self.rz  = self.np_random.uniform(-self.start_distance - 0.5,
-                                               -self.start_distance + 0.5)  # spec -Y
-            self.yaw = self.np_random.uniform(-40.0, 40.0)
+            self.rx  = self.np_random.uniform(-self.reset_x_range, self.reset_x_range)
+            self.ry  = self.np_random.uniform(-self.reset_z_range, self.reset_z_range)
+            self.rz  = self.np_random.uniform(-self.start_distance - self.reset_y_range,
+                                               -self.start_distance + self.reset_y_range)
+            self.yaw = self.np_random.uniform(-self.reset_yaw_range, self.reset_yaw_range)
         else:
             self.rx  = 0.0
             self.ry  = 0.0
@@ -303,8 +310,9 @@ class RobotWallEnv(gym.Env):
             self.yaw = 0.0
 
         obs = self._get_observation()
-        # initialise prev_error for potential-based reward
+        # initialise prev values for potential-based rewards
         self._prev_error = self._compute_total_error(obs)
+        self._prev_abs_yaw = abs(self.yaw)
         return obs, {}
 
     def step(self, action):
@@ -472,32 +480,35 @@ class RobotWallEnv(gym.Env):
         self._aligned = (
             num_visible == 8
             and float(pixel_dists.max()) <= self.align_pixel_thresh
+            and abs(self.yaw) <= 0.4
         )
 
-        # ── potential-based reward ───────────────────────────
-        potential_reward = 10.0 * (self._prev_error - E)
+        # ── track components for visualization ───────────────
+        success_bonus = 10.0 if self._aligned else 0.0
+        safety_penalty = -10.0 if (num_visible < 8 or self._out_of_bounds()) else 0.0
+        
+        # Pixel error potential (scaled down)
+        potential_reward = 0.1 * (self._prev_error - E)
         self._prev_error = E
 
+        # Yaw Potential: + reward if reduced, - penalty if increased
+        yaw_delta = self._prev_abs_yaw - abs(self.yaw)
+        yaw_potential = 5.0 * yaw_delta
+        self._prev_abs_yaw = abs(self.yaw)
+
+        step_cost = -0.05
+
+        self.last_reward_components = {
+            "Poten": potential_reward,
+            "Succ ": success_bonus,
+            "Safe ": safety_penalty,
+            "YawPt": yaw_potential,
+            "Step ": step_cost
+        }
+
         # ── total reward accumulation ────────────────────────
-        reward = potential_reward
-
-        # ── terminal success bonus ───────────────────────────
-        if self._aligned:
-            reward += 500.0
-
-        # ── safety / visibility penalty ──────────────────────
-        if num_visible < 8 or self._out_of_bounds():
-            reward -= 1000.0
-
-        # ── anti-jiggle penalty ──────────────────────────────
-        # Penalise immediately reversing the previous action
-        if action != -1 and self._prev_action != -1:
-            rev_map = {0: 1, 1: 0, 2: 3, 3: 2, 4: 5, 5: 4, 6: 7, 7: 6}
-            if action == rev_map.get(self._prev_action):
-                reward -= 5.0
-
-        # ── step cost ────────────────────────────────────────
-        reward -= 0.05
+        reward = (potential_reward + success_bonus + safety_penalty + 
+                  yaw_potential + step_cost)
 
         return reward
 
@@ -562,16 +573,45 @@ class RobotWallEnv(gym.Env):
                         cv2.FONT_HERSHEY_SIMPLEX,
                         1.0, (0, 255, 0), 2)
 
+        # ── Reward Breakdown ─────────────────────────────────
+        if hasattr(self, 'last_reward_components'):
+            y_offset = 125
+            for label, val in self.last_reward_components.items():
+                # Color code: green for positive, red for negative, white for zero
+                color = (0, 255, 0) if val > 0 else (0, 0, 255) if val < 0 else (200, 200, 200)
+                # Only show significant values OR show all for clarity
+                cv2.putText(frame, f"{label}: {val:+.2f}",
+                            (35, y_offset),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.5, color, 1)
+                y_offset += 20
+
         # Show spec coordinates: X=lateral, Y=depth, Z=vertical
         spec_x = self.rx
         spec_y = self._spec_y()
         spec_z = self.ry
+        
+        # Calculate relative angles
+        # Pos Angle: Angle from wall normal to robot position
+        pos_angle = np.degrees(np.arctan2(self.rx, -self.rz))
+        
+        # Look Angle: Bearing of wall center in camera view
+        R, _ = self._camera_Rt()
+        p_cam = R @ np.array([-self.rx, -self.ry, -self.rz])
+        look_h = np.degrees(np.arctan2(p_cam[0], p_cam[2]))
+        look_v = np.degrees(np.arctan2(p_cam[1], p_cam[2]))
+
         cv2.putText(
             frame,
-            f"X={spec_x:.2f}  Y={spec_y:.2f}  "
-            f"Z={spec_z:.2f}  Yaw={self.yaw:.1f}",
-            (30, self.H - 30),
+            f"X={spec_x:.2f}  Y={spec_y:.2f}  Z={spec_z:.2f}  Yaw={self.yaw:.1f}",
+            (30, self.H - 60),
             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1,
+        )
+        cv2.putText(
+            frame,
+            f"Pos Angle={pos_angle:.1f}  Look H={look_h:.1f}  Look V={look_v:.1f}",
+            (30, self.H - 30),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1,
         )
 
         # Show total error
@@ -579,7 +619,7 @@ class RobotWallEnv(gym.Env):
             cv2.putText(
                 frame,
                 f"Error: {self._total_error:.1f}px",
-                (30, self.H - 60),
+                (30, self.H - 90),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 1,
             )
 
@@ -595,6 +635,16 @@ class RobotWallEnv(gym.Env):
             print(f"  Max Pixel Dist  : {self._max_pixel_dist:.2f} px")
         if hasattr(self, '_total_error'):
             print(f"  Total Error     : {self._total_error:.1f} px")
+        
+        # Print Relative Angles
+        pos_angle = np.degrees(np.arctan2(self.rx, -self.rz))
+        R, _ = self._camera_Rt()
+        p_cam = R @ np.array([-self.rx, -self.ry, -self.rz])
+        look_h = np.degrees(np.arctan2(p_cam[0], p_cam[2]))
+        look_v = np.degrees(np.arctan2(p_cam[1], p_cam[2]))
+        print(f"  Pos Angle       : {pos_angle:.2f} deg")
+        print(f"  Look Angle (H/V): {look_h:.2f} / {look_v:.2f} deg")
+
         print(f"  Aligned         : {self._aligned}")
 
         # Print marker areas

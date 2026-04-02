@@ -43,9 +43,9 @@ BUFFER_SIZE     = 500_000
 EPS_START       = 1.0
 EPS_END         = 0.05
 # Linear decay: eps decreases from 1.0 to 0.05 over EPS_DECAY_STEPS
-EPS_DECAY_STEPS = 500_000   # steps over which epsilon decays linearly
+EPS_DECAY_STEPS = 1000000   # steps over which epsilon scouts for success
 TAU             = 0.005     # soft target update blending factor
-NUM_EPISODES    = 10000
+NUM_EPISODES    = 5000
 MAX_STEPS       = 800
 MODEL_DIR       = "models"
 LOG_DIR         = "logs"
@@ -320,6 +320,24 @@ def train(num_episodes=NUM_EPISODES, max_steps=MAX_STEPS,
     t0 = time.time()
 
     for ep in range(1, num_episodes + 1):
+        # ── Curriculum Update ────────────────────────────────
+        # Gradually increase randomization based on episode count
+        if ep < 1000:       # Level 1: Very easy
+            env.reset_x_range   = 0.1
+            env.reset_z_range   = 0.1
+            env.reset_y_range   = 0.1
+            env.reset_yaw_range = 5.0
+        elif ep < 3000:     # Level 2: Medium
+            env.reset_x_range   = 0.3
+            env.reset_z_range   = 0.2
+            env.reset_y_range   = 0.3
+            env.reset_yaw_range = 25.0
+        else:               # Level 3: Full difficulty
+            env.reset_x_range   = 0.5
+            env.reset_z_range   = 0.3
+            env.reset_y_range   = 0.5
+            env.reset_yaw_range = 40.0
+
         obs, _  = env.reset()
         state   = RobotWallEnv.flatten_obs(obs)
         ep_reward = 0.0
