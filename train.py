@@ -80,11 +80,11 @@ class ReplayBuffer:
     def sample(self, n):
         idx = np.random.randint(0, self.size, size=n)
 
-        states = torch.FloatTensor(self.states[idx])
-        actions = torch.LongTensor(self.actions[idx]).squeeze(1)
-        rewards = torch.FloatTensor(self.rewards[idx]).squeeze(1)
-        next_states = torch.FloatTensor(self.next_states[idx])
-        dones = torch.FloatTensor(self.dones[idx]).squeeze(1)
+        states = torch.as_tensor(self.states[idx], dtype=torch.float32)
+        actions = torch.as_tensor(self.actions[idx], dtype=torch.long).squeeze(1)
+        rewards = torch.as_tensor(self.rewards[idx], dtype=torch.float32).squeeze(1)
+        next_states = torch.as_tensor(self.next_states[idx], dtype=torch.float32)
+        dones = torch.as_tensor(self.dones[idx], dtype=torch.float32).squeeze(1)
 
         return states, actions, rewards, next_states, dones
 
@@ -295,6 +295,7 @@ def train(num_episodes=NUM_EPISODES, max_steps=MAX_STEPS,
     reward_hist  = deque(maxlen=100)
     success_hist = deque(maxlen=100)
     total_steps  = 0
+    curr_level   = 1
 
     # ── CSV logger ───────────────────────────────────────────
     csv_path = os.path.join(LOG_DIR, "training_log.csv")
@@ -320,14 +321,14 @@ def train(num_episodes=NUM_EPISODES, max_steps=MAX_STEPS,
     t0 = time.time()
 
     for ep in range(1, num_episodes + 1):
-        # ── Curriculum Update ────────────────────────────────
-        # Gradually increase randomization based on episode count
-        if ep < 1000:       # Level 1: Very easy
+        # ── Success-Based Curriculum Update ──────────────────
+        # Levels increase when the agent has mastered the current difficulty
+        if curr_level == 1:       # Level 1: Very easy
             env.reset_x_range   = 0.1
             env.reset_z_range   = 0.1
             env.reset_y_range   = 0.1
             env.reset_yaw_range = 5.0
-        elif ep < 3000:     # Level 2: Medium
+        elif curr_level == 2:     # Level 2: Medium
             env.reset_x_range   = 0.3
             env.reset_z_range   = 0.2
             env.reset_y_range   = 0.3
@@ -353,7 +354,10 @@ def train(num_episodes=NUM_EPISODES, max_steps=MAX_STEPS,
 
             agent.replay.push(state, action, reward,
                               next_state, float(done))
-            ep_loss += agent.train_step(total_steps)
+            
+            # ── Point 5: Train every N environment steps ────────
+            if total_steps % 2 == 0:
+                ep_loss += agent.train_step(total_steps)
 
             # live visualisation for first N episodes
             if ep <= visualize_eps:
@@ -407,15 +411,23 @@ def train(num_episodes=NUM_EPISODES, max_steps=MAX_STEPS,
             agent.save(ckpt_path)
             print(f"       ↳ Checkpoint saved → {ckpt_path}")
 
-        # ── early stop if learned enough ─────────────────────
+        # ── Level Up / Termination Logic ─────────────────────
         if len(success_hist) >= 100 and succ >= 0.90:
-            print(f"\n  ★ Early stop at ep {ep}: "
-                  f"success rate {succ*100:.1f}% ≥ 90% over 100 eps")
-            break
+            if curr_level < 3:
+                curr_level += 1
+                print(f"\n  ★★★ LEVEL UP! Mastered level {curr_level-1}, "
+                      f"advancing to LEVEL {curr_level} at ep {ep} "
+                      f"({succ*100:.1f}% success rate)")
+                success_hist.clear()
+                reward_hist.clear()
+            else:
+                print(f"\n  ★ MASTERY at ep {ep}: Final level mastered "
+                      f"({succ*100:.1f}% success rate)")
+                break
 
         # ── terminal log (periodic) ──────────────────────────
         if ep % 25 == 0 or ep == 1:
-            tag = "ALIGNED" if aligned else ""
+            tag = f"L{curr_level} " + ("ALIGNED" if aligned else "")
             print(f"{ep:>6} {steps:>6} {ep_reward:>8.2f} {avg:>8.2f} "
                   f"{succ*100:>5.1f}% {epsilon:>6.3f} "
                   f"{ep_loss/max(1,steps):>8.4f}  {tag}")

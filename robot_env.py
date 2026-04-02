@@ -38,7 +38,8 @@ class RobotWallEnv(gym.Env):
         Terminal Success: +10.0 if E < threshold AND yaw <= 0.4°
         Safety Penalty:  -10.0 if any marker lost or robot out of XY bounds (collision)
         Yaw Potential:   5.0 × (|yaw_{t-1}| - |yaw_t|)
-        Step Cost:       -0.05 per action
+        Anti-Jiggle:     -0.50 if action reverses the previous action
+        Step Cost:       -0.30 per action
     """
 
     def __init__(self):
@@ -129,6 +130,12 @@ class RobotWallEnv(gym.Env):
         self.ry  = 0.0                    # Y_up (vertical / spec Z)
         self.rz  = -self.start_distance   # Z_fwd (depth / spec -Y)
         self.yaw = 0.0
+        
+        # ── Pre-calculate 3D marker points for speed ──────────
+        markers_data = self._marker_3d_centres_and_boxes()
+        self.all_marker_centers_3d = np.vstack([m[0] for m in markers_data]) # (8, 3)
+        self.all_marker_corners_3d = np.vstack([m[1] for m in markers_data]) # (32, 3)
+        
         self._compute_reference_positions()
 
         self.reset()
@@ -222,14 +229,14 @@ class RobotWallEnv(gym.Env):
         Returns (pts_2d, valid_mask).
         """
         R, t = self._camera_Rt()
-        cam = (R @ pts_3d.T).T + t        # Nx3
-
+        # Vectorized projection
+        cam = (pts_3d @ R.T) + t.T        # Nx3 (batch-friendly multiplication)
+        
         valid = cam[:, 2] > 0.01
         pts_2d = np.full((len(pts_3d), 2), -1e4, dtype=np.float64)
         if np.any(valid):
-            z = cam[valid, 2]
-            pts_2d[valid, 0] = self.fx * cam[valid, 0] / z + self.cx
-            pts_2d[valid, 1] = self.fy * cam[valid, 1] / z + self.cy
+            z = cam[valid, 2:3]           # Nx1
+            pts_2d[valid] = (cam[valid, :2] / z) * np.array([[self.fx, self.fy]]) + np.array([[self.cx, self.cy]])
         return pts_2d, valid
 
     def _wall_visible(self):
@@ -382,24 +389,28 @@ class RobotWallEnv(gym.Env):
 
     def _get_observation(self):
         """Build 24-dim observation: 16 pixel offsets + 8 marker areas."""
+        # ── Vectorized Projection ────────────────────────────
+        # Project all centers and corners in one single call
+        all_pts_3d = np.vstack([self.all_marker_centers_3d, self.all_marker_corners_3d]) # (8+32) x 3
+        all_pts_2d, all_valid = self._project_points(all_pts_3d)
+        
+        c2 = all_pts_2d[:8]
+        c_valid = all_valid[:8]
+        b2_all = all_pts_2d[8:].reshape(8, 4, 2) # 8 markers, 4 corners each
+        b_valid_all = all_valid[8:].reshape(8, 4)
+
         marker_centers_px = np.zeros((8, 2), dtype=np.float32)
         marker_areas_px   = np.zeros(8, dtype=np.float32)
         marker_visible    = np.zeros(8, dtype=np.int8)
 
-        markers = self._marker_3d_centres_and_boxes()
-        for i, (ctr3, cor3) in enumerate(markers):
-            c2, cvalid = self._project_points(ctr3)
-            b2, bvalid = self._project_points(cor3)
-
-            # Consider marker visible if its center is in front of the camera (z > 0.01)
-            # and within image bounds (for realistic simulation of ArUco)
-            if cvalid[0] and np.all(bvalid):
-                cx, cy = c2[0]
-                # Check if center is roughly within the camera view
+        for i in range(8):
+            if c_valid[i] and np.all(b_valid_all[i]):
+                cx, cy = c2[i]
                 if 0 <= cx <= self.W and 0 <= cy <= self.H:
                     marker_centers_px[i] = [cx, cy]
-                    x1, y1 = b2[:, 0].min(), b2[:, 1].min()
-                    x2, y2 = b2[:, 0].max(), b2[:, 1].max()
+                    b_corners = b2_all[i]
+                    x1, y1 = b_corners[:, 0].min(), b_corners[:, 1].min()
+                    x2, y2 = b_corners[:, 0].max(), b_corners[:, 1].max()
                     marker_areas_px[i] = (x2 - x1) * (y2 - y1)
                     marker_visible[i] = 1
 
@@ -496,19 +507,28 @@ class RobotWallEnv(gym.Env):
         yaw_potential = 5.0 * yaw_delta
         self._prev_abs_yaw = abs(self.yaw)
 
-        step_cost = -0.05
+        # ── anti-jiggle penalty ──────────────────────────────
+        # penalty if current action reverses the previous action
+        jiggle_penalty = 0.0
+        if self._prev_action != -1:
+            # Pairs: (0,1), (2,3), (4,5), (6,7)
+            if (action // 2 == self._prev_action // 2) and (action != self._prev_action):
+                jiggle_penalty = -0.50
+
+        step_cost = -0.30
 
         self.last_reward_components = {
             "Poten": potential_reward,
             "Succ ": success_bonus,
             "Safe ": safety_penalty,
             "YawPt": yaw_potential,
+            "Jiggl": jiggle_penalty,
             "Step ": step_cost
         }
 
         # ── total reward accumulation ────────────────────────
         reward = (potential_reward + success_bonus + safety_penalty + 
-                  yaw_potential + step_cost)
+                  yaw_potential + jiggle_penalty + step_cost)
 
         return reward
 

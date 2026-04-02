@@ -9,6 +9,7 @@ Usage:
     python3 eval.py models/final_dqn.pth 10  # specific model, 10 eps
 """
 
+import argparse
 import sys
 import cv2
 import numpy as np
@@ -34,16 +35,33 @@ def load_model(path):
     return model, device
 
 
-def evaluate(model_path="models/best_dqn.pth", episodes=5):
+def evaluate(model_path="models/best_dqn.pth", episodes=5, level=3):
     """Run evaluation episodes with live visualisation."""
     model, device = load_model(model_path)
 
     env = RobotWallEnv()
     env.random_reset = True
+    
+    # ── Set Curriculum Level ─────────────────────────────
+    if level == 1:
+        env.reset_x_range   = 0.1
+        env.reset_z_range   = 0.1
+        env.reset_y_range   = 0.1
+        env.reset_yaw_range = 5.0
+    elif level == 2:
+        env.reset_x_range   = 0.3
+        env.reset_z_range   = 0.2
+        env.reset_y_range   = 0.3
+        env.reset_yaw_range = 25.0
+    else:  # Level 3 (Default/Full)
+        env.reset_x_range   = 0.5
+        env.reset_z_range   = 0.3
+        env.reset_y_range   = 0.5
+        env.reset_yaw_range = 40.0
 
     print(f"\n{'='*60}")
     print(f"  DQN Evaluation  —  {model_path}")
-    print(f"  Episodes: {episodes}")
+    print(f"  Episodes: {episodes}   |   Level: {level}")
     print(f"{'='*60}")
 
     for ep in range(1, episodes + 1):
@@ -52,8 +70,10 @@ def evaluate(model_path="models/best_dqn.pth", episodes=5):
         total_reward = 0.0
 
         print(f"\n── Episode {ep} ──")
-        print(f"   Start  X={env.rx:+.2f}  Y={env.ry:+.2f}  "
-              f"Z={env.rz:+.2f}  Yaw={env.yaw:+.1f}°")
+        spec_z = env.ry
+        spec_y = -env.rz
+        print(f"   Start  X={env.rx:+.2f}  Y={spec_y:+.2f}  "
+              f"Z={spec_z:+.2f}  Yaw={env.yaw:+.1f}°")
 
         for step in range(env.max_steps):
             # get Q-values and pick best action
@@ -108,6 +128,12 @@ def evaluate(model_path="models/best_dqn.pth", episodes=5):
 
 
 if __name__ == "__main__":
-    path = sys.argv[1] if len(sys.argv) > 1 else "models/best_dqn.pth"
-    eps  = int(sys.argv[2]) if len(sys.argv) > 2 else 5
-    evaluate(path, eps)
+    parser = argparse.ArgumentParser(description="Evaluate DQN Model")
+    parser.add_argument("model", type=str, nargs="?", default="models/best_dqn.pth",
+                        help="Path to the model to evaluate")
+    parser.add_argument("--eps", type=int, default=5, help="Number of episodes to run")
+    parser.add_argument("--level", type=int, choices=[1, 2, 3], default=3,
+                        help="Curriculum level (1=easy, 2=med, 3=hard)")
+    
+    args = parser.parse_args()
+    evaluate(args.model, args.eps, args.level)
