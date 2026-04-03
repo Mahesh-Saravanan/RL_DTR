@@ -333,11 +333,16 @@ def train(num_episodes=NUM_EPISODES, max_steps=MAX_STEPS,
             env.reset_z_range   = 0.2
             env.reset_y_range   = 0.3
             env.reset_yaw_range = 25.0
-        else:               # Level 3: Full difficulty
+        elif curr_level == 3:     # Level 3: Hard
             env.reset_x_range   = 0.5
             env.reset_z_range   = 0.3
             env.reset_y_range   = 0.5
             env.reset_yaw_range = 40.0
+        else:                     # Level 4: Extreme (No marker visibility start)
+            env.reset_x_range   = 0.8
+            env.reset_z_range   = 0.4
+            env.reset_y_range   = 1.0
+            env.reset_yaw_range = 80.0
 
         obs, _  = env.reset()
         state   = RobotWallEnv.flatten_obs(obs)
@@ -412,12 +417,14 @@ def train(num_episodes=NUM_EPISODES, max_steps=MAX_STEPS,
             print(f"       ↳ Checkpoint saved → {ckpt_path}")
 
         # ── Level Up / Termination Logic ─────────────────────
-        if len(success_hist) >= 100 and succ >= 0.90:
-            if curr_level < 3:
-                curr_level += 1
-                print(f"\n  ★★★ LEVEL UP! Mastered level {curr_level-1}, "
-                      f"advancing to LEVEL {curr_level} at ep {ep} "
+        if len(success_hist) >= 100 and succ >= 0.99:
+            if curr_level < 4:
+                print(f"\n  ★★★ LEVEL UP! Mastered level {curr_level}, "
+                      f"advancing to LEVEL {curr_level+1} at ep {ep} "
                       f"({succ*100:.1f}% success rate)")
+                curr_level += 1
+                # Bump epsilon to encourage exploration in new state space
+                epsilon = min(1.0, epsilon + 0.2)
                 success_hist.clear()
                 reward_hist.clear()
             else:

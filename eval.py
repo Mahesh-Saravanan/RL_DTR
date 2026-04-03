@@ -53,11 +53,16 @@ def evaluate(model_path="models/best_dqn.pth", episodes=5, level=3):
         env.reset_z_range   = 0.2
         env.reset_y_range   = 0.3
         env.reset_yaw_range = 25.0
-    else:  # Level 3 (Default/Full)
+    elif level == 3:
         env.reset_x_range   = 0.5
         env.reset_z_range   = 0.3
         env.reset_y_range   = 0.5
         env.reset_yaw_range = 40.0
+    else:  # Level 4 (Extreme)
+        env.reset_x_range   = 0.8
+        env.reset_z_range   = 0.4
+        env.reset_y_range   = 1.0
+        env.reset_yaw_range = 80.0
 
     print(f"\n{'='*60}")
     print(f"  DQN Evaluation  —  {model_path}")
@@ -132,8 +137,8 @@ if __name__ == "__main__":
     parser.add_argument("model", type=str, nargs="?", default="models/best_dqn.pth",
                         help="Path to the model to evaluate")
     parser.add_argument("--eps", type=int, default=5, help="Number of episodes to run")
-    parser.add_argument("--level", type=int, choices=[1, 2, 3], default=3,
-                        help="Curriculum level (1=easy, 2=med, 3=hard)")
+    parser.add_argument("--level", type=int, choices=[1, 2, 3, 4], default=4,
+                        help="Curriculum level (1=easy, 2=med, 3=hard, 4=extreme)")
     
     args = parser.parse_args()
     evaluate(args.model, args.eps, args.level)
