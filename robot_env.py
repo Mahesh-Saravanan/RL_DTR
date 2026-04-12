@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
+from collections import deque
 
 
 class RobotWallEnv(gym.Env):
@@ -99,6 +100,7 @@ class RobotWallEnv(gym.Env):
         self._prev_error  = 0.0           # for potential-based reward
         self._aligned = False             # strict alignment flag
         self.current_step = 0
+        self._action_history = deque(maxlen=4)  # last 4 actions for oscillation detection
 
         # ── XY boundary limits (spec X, spec Y) ─────────────
         self.x_bound = (-1.0, 1.0)        # lateral bounds (metres)
@@ -303,6 +305,7 @@ class RobotWallEnv(gym.Env):
         super().reset(seed=seed)
         self.current_step = 0
         self._prev_action = -1
+        self._action_history.clear()
 
         if self.random_reset:
             self.rx  = self.np_random.uniform(-self.reset_x_range, self.reset_x_range)
@@ -362,6 +365,7 @@ class RobotWallEnv(gym.Env):
         reward = self._compute_reward(obs, action)
 
         self._prev_action = action
+        self._action_history.append(action)
 
         terminated = self._aligned
         truncated  = self.current_step >= self.max_steps
@@ -420,6 +424,8 @@ class RobotWallEnv(gym.Env):
         pixel_offsets[:, 0] = (marker_centers_px[:, 0] - self.ref_centers_px[:, 0]) / self.W
         pixel_offsets[:, 1] = (marker_centers_px[:, 1] - self.ref_centers_px[:, 1]) / self.H
         # zero out invisible markers
+        # NOTE for future training: replace 0.0 with a sentinel like -2.0 so the network
+        # can distinguish "invisible" from "on target". Requires retraining from scratch.
         pixel_offsets[marker_visible == 0] = 0.0
 
         # ── marker areas (normalised) ────────────────────────
@@ -459,13 +465,15 @@ class RobotWallEnv(gym.Env):
     # ==========================================================
 
     def _compute_reward(self, obs, action):
-        """Reward function as per DQN 8-Marker Alignment spec.
+        """Reward function:
 
-        Potential-Based: 10.0 × (E_{t-1} − E_t)
-        Terminal Success: +500 if all markers within threshold
-        Safety Penalty:  -100 if any marker lost or robot out of XY bounds
-        Anti-Jiggle:     -5.0 if action reverses the previous action
-        Step Cost:       -0.5 per action
+        Potential-Based: 0.1 × (E_{t-1} − E_t)
+        Terminal Success: +10.0 if all markers within threshold AND yaw <= 0.4°
+        Safety Penalty:  -10.0 if any marker lost or robot out of XY bounds
+        Yaw Potential:   5.0 × (|yaw_{t-1}| - |yaw_t|)
+        Anti-Jiggle:     -1.5 if action reverses the previous action
+                         -3.0 (total) if sustained ABAB oscillation over 4 steps
+        Step Cost:       -0.30 per action
         """
         vis = obs["marker_visible"]
         num_visible = int(vis.sum())
@@ -508,12 +516,20 @@ class RobotWallEnv(gym.Env):
         self._prev_abs_yaw = abs(self.yaw)
 
         # ── anti-jiggle penalty ──────────────────────────────
-        # penalty if current action reverses the previous action
+        # -1.5 if current action reverses the previous action (same axis, opposite direction)
+        # -3.0 total if a sustained ABAB oscillation is confirmed over the last 4 steps
         jiggle_penalty = 0.0
         if self._prev_action != -1:
-            # Pairs: (0,1), (2,3), (4,5), (6,7)
+            # Pairs: (0,1)=X, (2,3)=Y, (4,5)=Z, (6,7)=Yaw
             if (action // 2 == self._prev_action // 2) and (action != self._prev_action):
-                jiggle_penalty = -0.50
+                jiggle_penalty = -1.5
+                # Extended check: detect ABAB pattern (same action 2 steps ago)
+                # _action_history holds actions from before this step, so:
+                #   hist[-1] == self._prev_action  (step t-1)
+                #   hist[-2] == action             (step t-2, same as current → ABAB)
+                hist = self._action_history
+                if len(hist) >= 2 and hist[-2] == action:
+                    jiggle_penalty -= 1.5  # total -3.0 for confirmed sustained oscillation
 
         step_cost = -0.30
 

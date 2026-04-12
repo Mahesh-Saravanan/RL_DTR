@@ -14,6 +14,7 @@ import sys
 import cv2
 import numpy as np
 import torch
+from collections import deque
 
 from robot_env import RobotWallEnv
 from train import QNetwork, STATE_DIM, ACTION_DIM
@@ -23,6 +24,51 @@ ACTION_NAMES = [
     "+X Right", "-X Left", "+Y Approach", "-Y Recede",
     "+Z Rise", "-Z Lower", "Rot CW", "Rot CCW",
 ]
+
+# Opposing action pairs: index → (low_action, high_action)
+_OPPOSING_PAIRS = [(2 * i, 2 * i + 1) for i in range(4)]  # (0,1),(2,3),(4,5),(6,7)
+
+
+def suppress_oscillation(action, history, q_values):
+    """Break deterministic ABAB oscillation loops during greedy evaluation.
+
+    When the last four actions form an alternating pair (e.g. 0,1,0,1 or 1,0,1,0)
+    the greedy policy is stuck in a loop. Pick the highest-Q action that is not
+    part of the oscillating pair instead.
+
+    Args:
+        action:    The argmax action the policy wants to take now.
+        history:   deque of the last N taken actions (most recent = rightmost).
+        q_values:  Raw Q-value array from the network (length ACTION_DIM).
+
+    Returns:
+        The (possibly overridden) action integer.
+    """
+    if len(history) < 3:
+        return action
+
+    prev = history[-1]
+
+    # Fast path: no immediate reversal → can't be oscillating
+    if (action // 2 != prev // 2) or (action == prev):
+        return action
+
+    # Build the prospective 4-step window and check for strict ABAB alternation
+    recent4 = [history[-3], history[-2], history[-1], action]
+    osc_pair = {action, prev}
+
+    is_abab = (
+        all(a in osc_pair for a in recent4) and
+        all(recent4[i] != recent4[i + 1] for i in range(3))
+    )
+
+    if is_abab:
+        # Escape: pick the best Q-value action that is outside the oscillating pair
+        for candidate in np.argsort(q_values)[::-1]:
+            if candidate not in osc_pair:
+                return int(candidate)
+
+    return action
 
 
 def load_model(path):
@@ -73,6 +119,7 @@ def evaluate(model_path="models/best_dqn.pth", episodes=5, level=3):
         obs, _ = env.reset()
         state  = RobotWallEnv.flatten_obs(obs)
         total_reward = 0.0
+        action_history = deque(maxlen=6)  # per-episode action history for oscillation detection
 
         print(f"\n── Episode {ep} ──")
         spec_z = env.ry
@@ -87,6 +134,9 @@ def evaluate(model_path="models/best_dqn.pth", episodes=5, level=3):
                 q = model(s).squeeze().cpu().numpy()
 
             action = int(q.argmax())
+            # Override if we've detected an ABAB oscillation loop
+            action = suppress_oscillation(action, action_history, q)
+            action_history.append(action)
 
             # show the chosen action and top-3 Q-values
             sorted_idx = np.argsort(q)[::-1]
